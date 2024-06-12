@@ -543,7 +543,207 @@ python manage.py createsuperuser
     "refresh_token": "your_refresh_token"
 }
 ```
-**Response:**  
-`Status: 205 Reset Content`
+HR Login
+URL: http://127.0.0.1:8000/api/hr/login/
+Method: POST
+Body (raw JSON):
+json
+Copy code
+{
+    "username": "your_hr_username",
+    "password": "your_hr_password"
+}
+Expected Response:
+json
+Copy code
+{
+    "refresh": "your_refresh_token",
+    "access": "your_access_token"
+}
+User Login
+URL: http://127.0.0.1:8000/api/user/login/
+Method: POST
+Body (raw JSON):
+json
+Copy code
+{
+    "username": "your_user_username",
+    "password": "your_user_password"
+}
+Expected Response:
+json
+Copy code
+{
+    "refresh": "your_refresh_token",
+    "access": "your_access_token"
+}
+User Registration
+URL: http://127.0.0.1:8000/api/register/
+Method: POST
+Headers:
+Authorization: Bearer <hr_access_token>
+Body (raw JSON):
+json
+Copy code
+{
+    "first_name": "John",
+    "last_name": "Doe",
+    "username": "johndoe",
+    "password": "password123",
+    "salary": "50000.00",
+    "date_of_joining": "2022-01-01",
+    "department": 1,
+    "position": 1
+}
+Expected Response:
+json
+Copy code
+{
+    "msg": "User registered successfully",
+    "user": {
+        "id": 1,
+        "first_name": "John",
+        "last_name": "Doe",
+        "username": "johndoe",
+        "salary": "50000.00",
+        "date_of_joining": "2022-01-01",
+        "department": 1,
+        "position": 1,
+        "leaves": [],
+        "tasks": []
+    }
+}
+User Profile
+URL: http://127.0.0.1:8000/api/profile/
+Method: GET
+Headers:
+Authorization: Bearer <user_access_token>
+Expected Response:
+json
+Copy code
+{
+    "id": 1,
+    "first_name": "John",
+    "last_name": "Doe",
+    "username": "johndoe",
+    "salary": "50000.00",
+    "date_of_joining": "2022-01-01",
+    "department": 1,
+    "position": 1,
+    "leaves": [],
+    "tasks": []
+}
+Apply for Leave
+URL: http://127.0.0.1:8000/api/leaves/
+Method: POST
+Headers:
+Authorization: Bearer <user_access_token>
+Body (raw JSON):
+json
+Copy code
+{
+    "user": 1,
+    "leave_type": "casual",
+    "start_date": "2023-07-01",
+    "end_date": "2023-07-03",
+    "is_approved": false
+}
+Expected Response:
+json
+Copy code
+{
+    "id": 1,
+    "user": 1,
+    "leave_type": "casual",
+    "start_date": "2023-07-01",
+    "end_date": "2023-07-03",
+    "is_approved": false
+}
+Approve Leave (HR Only)
+URL: http://127.0.0.1:8000/api/leaves/<leave_id>/
+Method: PUT
+Headers:
+Authorization: Bearer <hr_access_token>
+Body (raw JSON):
+json
+Copy code
+{
+    "user": 1,
+    "leave_type": "casual",
+    "start_date": "2023-07-01",
+    "end_date": "2023-07-03",
+    "is_approved": true
+}
+Expected Response:
+json
+Copy code
+{
+    "id": 1,
+    "user": 1,
+    "leave_type": "casual",
+    "start_date": "2023-07-01",
+    "end_date": "2023-07-03",
+    "is_approved": true
+}
+Check In
+URL: http://127.0.0.1:8000/api/attendance/
+Method: POST
+Headers:
+Authorization: Bearer <user_access_token>
+Body (raw JSON):
+json
+Copy code
+{
+    "user": 1,
+    "check_in": "2023-07-01T08:30:00Z",
+    "check_out": null,
+    "is_late": false
+}
+Expected Response:
+json
+Copy code
+{
+    "id": 1,
+    "user": 1,
+    "check_in": "2023-07-01T08:30:00Z",
+    "check_out": null,
+    "is_late": false
+}
+Check Out
+URL: http://127.0.0.1:8000/api/attendance/<attendance_id>/
+Method: PUT
+Headers:
+Authorization: Bearer <user_access_token>
+Body (raw JSON):
+json
+Copy code
+{
+    "user": 1,
+    "check_in": "2023-07-01T08:30:00Z",
+    "check_out": "2023-07-01T17:30:00Z",
+    "is_late": false
+}
+Expected Response:
+json
+Copy code
+{
+    "id": 1,
+    "user": 1,
+    "check_in": "2023-07-01T08:30:00Z",
+    "check_out": "2023-07-01T17:30:00Z",
+    "is_late": false
+}
+Logout
+URL: http://127.0.0.1:8000/api/logout/
+Method: POST
+Headers:
+Authorization: Bearer <your_access_token>
+Body (raw JSON):
+json
+Copy code
+{
+    "refresh_token": "your_refresh_token"
+}
+Expected Response: Status: 205 Reset Content
 
 These are the primary API endpoints required for user registration, login, profile access, leave management, attendance marking, and logout. You can further expand upon this to add more detailed functionalities as needed. The provided guide should cover all essential aspects to get you started with the employee management system.
