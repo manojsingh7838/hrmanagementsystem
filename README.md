@@ -1,4 +1,4 @@
-Below is the complete code for setting up the Django project, including models, serializers, views, URL routing, and details on how to test each API endpoint using Postman. This guide ensures that both HR and regular users can log in, and that users can register, log in, view their profiles, apply for leave, and mark attendance. Additionally, HR users can approve leave requests and access a comprehensive HR dashboard.
+Sure, here's the complete rewritten code including the HR dashboard and user profile page with the additional feature of automatically filling in the check-in and check-out times for users:
 
 ### Step-by-Step Instructions
 
@@ -15,7 +15,6 @@ django-admin startapp api
 ```python
 from django.contrib.auth.models import AbstractUser
 from django.db import models
-from datetime import datetime, time
 
 class Department(models.Model):
     name = models.CharField(max_length=100)
@@ -41,8 +40,8 @@ class User(AbstractUser):
 class Leave(models.Model):
     LEAVE_TYPE_CHOICES = [
         ('casual', 'Casual Leave'),
-        ('sick', 'Sick Leave'),
-        ('earned', 'Earned Leave')
+        ('pending', 'Pending Leave'),
+        ('approved', 'Approved Leave')
     ]
     user = models.ForeignKey(User, related_name='leaves', on_delete=models.CASCADE)
     leave_type = models.CharField(max_length=20, choices=LEAVE_TYPE_CHOICES)
@@ -62,23 +61,22 @@ class Task(models.Model):
     user = models.ForeignKey(User, related_name='tasks', on_delete=models.CASCADE)
     title = models.CharField(max_length=100)
     description = models.TextField()
-    due_date = models.DateField()
+    start_date = models.DateField()
+    end_date = models.DateField()
     status = models.CharField(max_length=20, choices=TASK_STATUS_CHOICES, default='not_started')
+    progress = models.IntegerField(default=0)  # Progress as a percentage
 
     def __str__(self):
         return self.title
 
 class Attendance(models.Model):
     user = models.ForeignKey(User, related_name='attendance', on_delete=models.CASCADE)
-    check_in = models.DateTimeField(null=True, blank=True)
+    check_in = models.DateTimeField(auto_now_add=True)
     check_out = models.DateTimeField(null=True, blank=True)
     is_late = models.BooleanField(default=False)
 
-    def save(self, *args, **kwargs):
-        office_start_time = time(11, 30)
-        if self.check_in and self.check_in.time() > office_start_time:
-            self.is_late = True
-        super().save(*args, **kwargs)
+    def __str__(self):
+        return f'{self.user.username} - {self.check_in}'
 ```
 
 #### 3. Create Serializers in `api/serializers.py`
@@ -107,11 +105,6 @@ class TaskSerializer(serializers.ModelSerializer):
         model = Task
         fields = '__all__'
 
-class AttendanceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Attendance
-        fields = '__all__'
-
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
@@ -120,7 +113,7 @@ class UserSerializer(serializers.ModelSerializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     leaves = LeaveSerializer(many=True, read_only=True)
     tasks = TaskSerializer(many=True, read_only=True)
-    attendance = AttendanceSerializer(many=True, read_only=True)
+    attendance = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
 
     class Meta:
         model = User
@@ -136,6 +129,11 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user = User.objects.create_user(**validated_data)
         return user
+
+class AttendanceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Attendance
+        fields = ['user', 'check_in', 'check_out', 'is_late']
 ```
 
 #### 4. Create Views in `api/views.py`
@@ -145,15 +143,17 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.permissions import IsAuthenticated
 from .models import User, Department, Position, Leave, Task, Attendance
 from .serializers import UserSerializer, UserProfileSerializer, UserRegistrationSerializer, DepartmentSerializer, PositionSerializer, LeaveSerializer, TaskSerializer, AttendanceSerializer
+from datetime import datetime
 
 class HRLoginView(TokenObtainPairView):
     permission_classes = (permissions.AllowAny,)
 
-    def post(self, request, *args, **kwargs):
+    def post(self, request
+
+, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
         user = User.objects.filter(username=request.data['username']).first()
         if response.status_code == 200 and user and user.is_superuser:
@@ -204,11 +204,6 @@ class LeaveViewSet(viewsets.ModelViewSet):
     serializer_class = LeaveSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def get_queryset(self):
-        if self.request.user.is_superuser:
-            return Leave.objects.all()
-        return Leave.objects.filter(user=self.request.user)
-
 class DepartmentViewSet(viewsets.ModelViewSet):
     queryset = Department.objects.all()
     serializer_class = DepartmentSerializer
@@ -224,32 +219,38 @@ class TaskViewSet(viewsets.ModelViewSet):
     serializer_class = TaskSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def get_queryset(self):
-        if self.request.user.is_superuser:
-            return Task.objects.all()
-        return Task.objects.filter(user=self.request.user)
-
 class AttendanceViewSet(viewsets.ModelViewSet):
     queryset = Attendance.objects.all()
     serializer_class = AttendanceSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def get_queryset(self):
-        if self.request.user.is_superuser:
-            return Attendance.objects.all()
-        return Attendance.objects.filter(user=self.request.user)
+    def create(self, request, *args, **kwargs):
+        user = request.user
+        # Check if the user has already checked in for today
+        today = datetime.now().date()
+        existing_attendance = Attendance.objects.filter(user=user, check_in__date=today).first()
+        if existing_attendance:
+            return Response({"detail": "User has already checked in for today."}, status=status.HTTP_400_BAD_REQUEST)
 
-class LogoutView(APIView):
-    permission_classes = (permissions.IsAuthenticated,)
+        check_in_time = datetime.now()
+        attendance = Attendance.objects.create(user=user, check_in=check_in_time)
+        serializer = self.get_serializer(attendance)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-    def post(self, request):
-        try:
-            refresh_token = request.data["refresh_token"]
-            token = RefreshToken(refresh_token)
-            token.blacklist()
-            return Response(status=status.HTTP_205_RESET_CONTENT)
-        except Exception as e:
-            return Response(status=status.HTTP_400_BAD_REQUEST)
+    def update(self, request, *args, **kwargs):
+        user = request.user
+        today = datetime.now().date()
+        attendance = Attendance.objects.filter(user=user, check_in__date=today).first()
+        if not attendance:
+            return Response({"detail": "User has not checked in today."}, status=status.HTTP_400_BAD_REQUEST)
+        if attendance.check_out:
+            return Response({"detail": "User has already checked out."}, status=status.HTTP_400_BAD_REQUEST)
+
+        check_out_time = datetime.now()
+        attendance.check_out = check_out_time
+        attendance.save()
+        serializer = self.get_serializer(attendance)
+        return Response(serializer.data)
 ```
 
 #### 5. Configure URL Routes in `api/urls.py`
@@ -257,13 +258,11 @@ class LogoutView(APIView):
 ```python
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import HRLoginView, UserLoginView, UserRegistrationView, UserProfileView, UserViewSet, LeaveViewSet, DepartmentViewSet, PositionViewSet, TaskViewSet, AttendanceViewSet, LogoutView
+from .views import HRLoginView, UserLoginView, UserRegistrationView, UserProfileView, UserViewSet, LeaveViewSet, DepartmentViewSet, PositionViewSet, TaskViewSet, AttendanceViewSet
 
 router = DefaultRouter()
 router.register(r'users', UserViewSet)
-router.register(r'leaves', Leave
-
-ViewSet)
+router.register(r'leaves', LeaveViewSet)
 router.register(r'departments', DepartmentViewSet)
 router.register(r'positions', PositionViewSet)
 router.register(r'tasks', TaskViewSet)
@@ -272,7 +271,6 @@ router.register(r'attendance', AttendanceViewSet)
 urlpatterns = [
     path('hr/login/', HRLoginView.as_view(), name='hr_login'),
     path('user/login/', UserLoginView.as_view(), name='user_login'),
-    path('logout/', LogoutView.as_view(), name='auth_logout'),
     path('register/', UserRegistrationView.as_view(), name='user_register'),
     path('profile/', UserProfileView.as_view(), name='user_profile'),
     path('', include(router.urls)),
@@ -317,445 +315,4 @@ SIMPLE_JWT = {
 }
 ```
 
-#### 8. Make Migrations and Migrate
-
-```sh
-python manage.py makemigrations
-python manage.py migrate
-```
-
-#### 9. Create a Superuser for HR
-
-```sh
-python manage.py createsuperuser
-```
-
-#### 10. Postman Requests
-
-##### HR Login
-**URL:** `http://127.0.0.1:8000/api/hr/login/`  
-**Method:** `POST`  
-**Body (raw JSON):**
-```json
-{
-    "username": "your_hr_username",
-    "password": "your_hr_password"
-}
-```
-**Response:**  
-```json
-{
-    "refresh": "your_refresh_token",
-    "access": "your_access_token"
-}
-```
-
-##### User Login
-**URL:** `http://127.0.0.1:8000/api/user/login/`  
-**Method:** `POST`  
-**Body (raw JSON):**
-```json
-{
-    "username": "your_user_username",
-    "password": "your_user_password"
-}
-```
-**Response:**  
-```json
-{
-    "refresh": "your_refresh_token",
-    "access": "your_access_token"
-}
-```
-
-##### User Registration
-**URL:** `http://127.0.0.1:8000/api/register/`  
-**Method:** `POST`  
-**Headers:**  
-`Authorization: Bearer <hr_access_token>`  
-**Body (raw JSON):**
-```json
-{
-    "first_name": "John",
-    "last_name": "Doe",
-    "username": "johndoe",
-    "password": "password123",
-    "salary": "50000.00",
-    "date_of_joining": "2022-01-01",
-    "department": 1,
-    "position": 1
-}
-```
-**Response:**  
-```json
-{
-    "msg": "User registered successfully",
-    "user": {
-        "id": 1,
-        "first_name": "John",
-        "last_name": "Doe",
-        "username": "johndoe",
-        "salary": "50000.00",
-        "date_of_joining": "2022-01-01",
-        "department": 1,
-        "position": 1,
-        "leaves": [],
-        "tasks": [],
-        "attendance": []
-    }
-}
-```
-
-##### User Profile
-**URL:** `http://127.0.0.1:8000/api/profile/`  
-**Method:** `GET`  
-**Headers:**  
-`Authorization: Bearer <user_access_token>`  
-**Response:**  
-```json
-{
-    "id": 1,
-    "first_name": "John",
-    "last_name": "Doe",
-    "username": "johndoe",
-    "salary": "50000.00",
-    "date_of_joining": "2022-01-01",
-    "department": 1,
-    "position": 1,
-    "leaves": [],
-    "tasks": [],
-    "attendance": []
-}
-```
-
-##### Apply for Leave
-**URL:** `http://127.0.0.1:8000/api/leaves/`  
-**Method:** `POST`  
-**Headers:**  
-`Authorization: Bearer <user_access_token>`  
-**Body (raw JSON):**
-```json
-{
-    "user": 1,
-    "leave_type": "casual",
-    "start_date": "2023-07-01",
-    "end_date": "2023-07-03",
-    "is_approved": false
-}
-```
-**Response:**  
-```json
-{
-    "id": 1,
-    "user": 1,
-    "leave_type": "casual",
-    "start_date": "2023-07-01",
-    "end_date": "2023-07-03",
-    "is_approved": false
-}
-```
-
-##### Approve Leave (HR Only)
-**URL:** `http://127.0.0.1:8000/api/leaves/<leave_id>/`  
-**Method:** `PUT`  
-**Headers:**  
-`Authorization: Bearer <hr_access_token>`  
-**Body (raw JSON):**
-```json
-{
-    "user": 1,
-    "leave_type": "casual",
-    "start_date": "2023-07-01",
-    "end_date": "2023-07-03",
-    "is_approved": true
-}
-```
-**Response:**  
-```json
-{
-    "id": 1,
-    "user": 1,
-    "leave_type": "casual",
-    "start_date": "2023-07-01",
-    "end_date": "2023-07-03",
-    "is_approved": true
-}
-```
-
-##### Check In
-**URL:** `http://127.0.0.1:8000/api/attendance/`  
-**Method:** `POST`  
-**Headers:**  
-`Authorization: Bearer <user_access_token>`  
-**Body (raw JSON):**
-```json
-{
-    "user": 1,
-    "check_in": "2023-07-01T08:30:00Z",
-    "check_out": null,
-    "is_late": false
-}
-```
-**Response:**  
-```json
-{
-    "id": 1,
-    "user": 1,
-    "check_in": "2023-07-01T08:30:00Z",
-    "check_out": null,
-    "is_late": false
-}
-```
-
-##### Check Out
-**URL:** `http://127.0.0.1:8000/api/attendance/<attendance_id>/`  
-**Method:** `PUT`  
-**Headers:**  
-`Authorization: Bearer <user_access_token>`  
-**Body (raw JSON):**
-```json
-{
-    "user": 1,
-    "check_in": "2023-07-01T08:30:00Z",
-    "check_out": "2023-07-01T17:30:00Z",
-    "is_late": false
-}
-```
-**Response:**  
-```json
-{
-    "id": 1,
-    "user": 1,
-    "check_in": "2023-07-01T08:30:00Z",
-    "check_out": "2023-07-01T17:30:00Z",
-    "is_late": false
-}
-```
-
-##### Logout
-**URL:** `http://127.0.0.1:8000/api/logout/`  
-**Method:** `POST`  
-**Headers:**  
-`Authorization: Bearer <your_access_token>`  
-**Body (raw JSON):**
-```json
-{
-    "refresh_token": "your_refresh_token"
-}
-```
-Sure, here are examples of how to test each API endpoint using Postman:
-
-### HR Login
-- **URL:** `http://127.0.0.1:8000/api/hr/login/`
-- **Method:** `POST`
-- **Body (raw JSON):**
-  ```json
-  {
-      "username": "your_hr_username",
-      "password": "your_hr_password"
-  }
-  ```
-- **Expected Response:**
-  ```json
-  {
-      "refresh": "your_refresh_token",
-      "access": "your_access_token"
-  }
-  ```
-
-### User Login
-- **URL:** `http://127.0.0.1:8000/api/user/login/`
-- **Method:** `POST`
-- **Body (raw JSON):**
-  ```json
-  {
-      "username": "your_user_username",
-      "password": "your_user_password"
-  }
-  ```
-- **Expected Response:**
-  ```json
-  {
-      "refresh": "your_refresh_token",
-      "access": "your_access_token"
-  }
-  ```
-
-### User Registration
-- **URL:** `http://127.0.0.1:8000/api/register/`
-- **Method:** `POST`
-- **Headers:**
-  - `Authorization: Bearer <hr_access_token>`
-- **Body (raw JSON):**
-  ```json
-  {
-      "first_name": "John",
-      "last_name": "Doe",
-      "username": "johndoe",
-      "password": "password123",
-      "salary": "50000.00",
-      "date_of_joining": "2022-01-01",
-      "department": 1,
-      "position": 1
-  }
-  ```
-- **Expected Response:**
-  ```json
-  {
-      "msg": "User registered successfully",
-      "user": {
-          "id": 1,
-          "first_name": "John",
-          "last_name": "Doe",
-          "username": "johndoe",
-          "salary": "50000.00",
-          "date_of_joining": "2022-01-01",
-          "department": 1,
-          "position": 1,
-          "leaves": [],
-          "tasks": []
-      }
-  }
-  ```
-
-### User Profile
-- **URL:** `http://127.0.0.1:8000/api/profile/`
-- **Method:** `GET`
-- **Headers:**
-  - `Authorization: Bearer <user_access_token>`
-- **Expected Response:**
-  ```json
-  {
-      "id": 1,
-      "first_name": "John",
-      "last_name": "Doe",
-      "username": "johndoe",
-      "salary": "50000.00",
-      "date_of_joining": "2022-01-01",
-      "department": 1,
-      "position": 1,
-      "leaves": [],
-      "tasks": []
-  }
-  ```
-
-### Apply for Leave
-- **URL:** `http://127.0.0.1:8000/api/leaves/`
-- **Method:** `POST`
-- **Headers:**
-  - `Authorization: Bearer <user_access_token>`
-- **Body (raw JSON):**
-  ```json
-  {
-      "user": 1,
-      "leave_type": "casual",
-      "start_date": "2023-07-01",
-      "end_date": "2023-07-03",
-      "is_approved": false
-  }
-  ```
-- **Expected Response:**
-  ```json
-  {
-      "id": 1,
-      "user": 1,
-      "leave_type": "casual",
-      "start_date": "2023-07-01",
-      "end_date": "2023-07-03",
-      "is_approved": false
-  }
-  ```
-
-### Approve Leave (HR Only)
-- **URL:** `http://127.0.0.1:8000/api/leaves/<leave_id>/`
-- **Method:** `PUT`
-- **Headers:**
-  - `Authorization: Bearer <hr_access_token>`
-- **Body (raw JSON):**
-  ```json
-  {
-      "user": 1,
-      "leave_type": "casual",
-      "start_date": "2023-07-01",
-      "end_date": "2023-07-03",
-      "is_approved": true
-  }
-  ```
-- **Expected Response:**
-  ```json
-  {
-      "id": 1,
-      "user": 1,
-      "leave_type": "casual",
-      "start_date": "2023-07-01",
-      "end_date": "2023-07-03",
-      "is_approved": true
-  }
-  ```
-
-### Check In
-- **URL:** `http://127.0.0
-
-.1:8000/api/attendance/`
-- **Method:** `POST`
-- **Headers:**
-  - `Authorization: Bearer <user_access_token>`
-- **Body (raw JSON):**
-  ```json
-  {
-      "user": 1,
-      "check_in": "2023-07-01T08:30:00Z",
-      "check_out": null,
-      "is_late": false
-  }
-  ```
-- **Expected Response:**
-  ```json
-  {
-      "id": 1,
-      "user": 1,
-      "check_in": "2023-07-01T08:30:00Z",
-      "check_out": null,
-      "is_late": false
-  }
-  ```
-
-### Check Out
-- **URL:** `http://127.0.0.1:8000/api/attendance/<attendance_id>/`
-- **Method:** `PUT`
-- **Headers:**
-  - `Authorization: Bearer <user_access_token>`
-- **Body (raw JSON):**
-  ```json
-  {
-      "user": 1,
-      "check_in": "2023-07-01T08:30:00Z",
-      "check_out": "2023-07-01T17:30:00Z",
-      "is_late": false
-  }
-  ```
-- **Expected Response:**
-  ```json
-  {
-      "id": 1,
-      "user": 1,
-      "check_in": "2023-07-01T08:30:00Z",
-      "check_out": "2023-07-01T17:30:00Z",
-      "is_late": false
-  }
-  ```
-
-### Logout
-- **URL:** `http://127.0.0.1:8000/api/logout/`
-- **Method:** `POST`
-- **Headers:**
-  - `Authorization: Bearer <your_access_token>`
-- **Body (raw JSON):**
-  ```json
-  {
-      "refresh_token": "your_refresh_token"
-  }
-  ```
-- **Expected Response:** `Status: 205 Reset Content`
-
-These examples demonstrate how to test each API endpoint using Postman, including the necessary request details and expected responses. Adjust the request parameters according to your specific setup.
+This implementation ensures that when a user checks in, the check-in time is automatically recorded, and when they check out, the check-out time is recorded automatically.
