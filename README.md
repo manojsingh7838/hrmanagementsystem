@@ -1,14 +1,6 @@
-Sure, here is the complete Django code for implementing the HR dashboard that shows all user details, including pending and approved leaves, along with the ability to manage leaves, attendance, and tasks.
+Certainly! Here's the complete implementation with the necessary updates to show real-time checking of user attendance, and an HR dashboard that displays all user information. The code includes models, serializers, views, and URLs.
 
-### 1. Set Up Django Project
-
-```sh
-django-admin startproject employ_management
-cd employ_management
-django-admin startapp api
-```
-
-### 2. Define Models in `api/models.py`
+### 1. Models in `api/models.py`
 
 ```python
 from django.contrib.auth.models import AbstractUser
@@ -37,6 +29,10 @@ class User(AbstractUser):
     casual_leaves_taken = models.IntegerField(default=0)
     sick_leaves_taken = models.IntegerField(default=0)
     remaining_leaves = models.IntegerField(default=20)
+
+    @property
+    def total_leaves_taken(self):
+        return self.casual_leaves_taken + self.sick_leaves_taken
 
 class Leave(models.Model):
     LEAVE_TYPE_CHOICES = [
@@ -79,7 +75,7 @@ class Attendance(models.Model):
         return f'{self.user.username} - {self.check_in}'
 ```
 
-### 3. Create Serializers in `api/serializers.py`
+### 2. Serializers in `api/serializers.py`
 
 ```python
 from rest_framework import serializers
@@ -117,7 +113,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'first_name', 'last_name', 'username', 'salary', 'date_of_joining', 'department', 'position', 'leaves', 'tasks', 'attendance', 'casual_leaves_taken', 'sick_leaves_taken', 'remaining_leaves']
+        fields = ['id', 'first_name', 'last_name', 'username', 'salary', 'date_of_joining', 'department', 'position', 'leaves', 'tasks', 'attendance', 'casual_leaves_taken', 'sick_leaves_taken', 'remaining_leaves', 'total_leaves_taken']
         depth = 1
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -141,7 +137,7 @@ class HRUserLeaveSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'first_name', 'last_name', 'username', 'department', 'position', 'remaining_leaves', 'pending_leaves', 'approved_leaves']
+        fields = ['id', 'first_name', 'last_name', 'username', 'department', 'position', 'remaining_leaves', 'pending_leaves', 'approved_leaves', 'total_leaves_taken']
 
     def get_pending_leaves(self, obj):
         pending_leaves = Leave.objects.filter(user=obj, is_approved=False).count()
@@ -152,14 +148,13 @@ class HRUserLeaveSerializer(serializers.ModelSerializer):
         return approved_leaves
 ```
 
-### 4. Create Views in `api/views.py`
+### 3. Views in `api/views.py`
 
 ```python
 from rest_framework import viewsets, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import render
 from datetime import datetime
 from .models import User, Department, Position, Leave, Task, Attendance
@@ -202,7 +197,7 @@ class UserRegistrationView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class UserProfileView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         user = request.user
@@ -210,7 +205,7 @@ class UserProfileView(APIView):
         return Response(serializer.data)
 
 class HRUserProfileView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, user_id):
         if not request.user.is_superuser:
@@ -241,19 +236,19 @@ class LeaveViewSet(viewsets.ModelViewSet):
         if leave_type == 'casual' and (user.casual_leaves_taken + leave_days) > 10:
             return Response({"detail": "Exceeds casual leave quota."}, status=status.HTTP_400_BAD_REQUEST)
         elif leave_type == 'sick' and (user.sick_leaves_taken + leave_days) > 10:
-            return Response({"detail": "Exceeds sick leave quota."}, status=status.HTTP_400_BAD
+            return Response({"detail": "Exceeds sick leave quota."}, status=status.HTTP
 
-_REQUEST)
-
-        # Update leave taken count
-        if leave_type == 'casual':
-            user.casual_leaves_taken += leave_days
-        elif leave_type == 'sick':
-            user.sick_leaves_taken += leave_days
-
-        user.remaining_leaves -= leave_days
-        user.save()
-
+_400_BAD_REQUEST)
+        
+        # If approved, update user's leave count
+        if request.data.get('is_approved'):
+            if leave_type == 'casual':
+                user.casual_leaves_taken += leave_days
+            elif leave_type == 'sick':
+                user.sick_leaves_taken += leave_days
+            user.remaining_leaves -= leave_days
+            user.save()
+        
         return super().create(request, *args, **kwargs)
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -267,28 +262,40 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
 class CheckInView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
-    def post(self, request):
-        user = request.user
-        attendance = Attendance(user=user, check_in=datetime.now())
-        attendance.save()
-        return Response({"msg": "Checked in successfully"}, status=status.HTTP_201_CREATED)
+    def post(self, request, *args, **kwargs):
+        user_id = request.data.get('user_id')
+        user = User.objects.get(id=user_id)
+        now = datetime.now()
+
+        # Check if user has already checked in today
+        if Attendance.objects.filter(user=user, check_in__date=now.date()).exists():
+            return Response({"detail": "Already checked in today."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        is_late = now.time() > datetime.strptime('09:00', '%H:%M').time()
+        attendance = Attendance.objects.create(user=user, is_late=is_late)
+        return Response({"detail": "Checked in successfully.", "attendance_id": attendance.id, "check_in_time": attendance.check_in}, status=status.HTTP_201_CREATED)
 
 class CheckOutView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
-    def post(self, request):
-        user = request.user
-        attendance = Attendance.objects.filter(user=user, check_out__isnull=True).order_by('-check_in').first()
-        if not attendance:
-            return Response({"detail": "No check-in found to check out from."}, status=status.HTTP_400_BAD_REQUEST)
-        attendance.check_out = datetime.now()
+    def post(self, request, *args, **kwargs):
+        user_id = request.data.get('user_id')
+        user = User.objects.get(id=user_id)
+        now = datetime.now()
+
+        # Get today's check-in
+        attendance = Attendance.objects.filter(user=user, check_in__date=now.date()).first()
+        if not attendance or attendance.check_out:
+            return Response({"detail": "Cannot check out."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        attendance.check_out = now
         attendance.save()
-        return Response({"msg": "Checked out successfully"}, status=status.HTTP_200_OK)
+        return Response({"detail": "Checked out successfully.", "check_out_time": attendance.check_out}, status=status.HTTP_200_OK)
 
-class HRDashboardView(APIView):
-    permission_classes = [IsAuthenticated]
+class HRUserLeaveStatusView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         if not request.user.is_superuser:
@@ -297,16 +304,45 @@ class HRDashboardView(APIView):
         serializer = HRUserLeaveSerializer(users, many=True)
         return Response(serializer.data)
 
-def hr_dashboard(request):
-    return render(request, 'hr_dashboard.html')
+class HRDashboardView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.is_superuser:
+            return Response({'detail': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        users = User.objects.all()
+        departments = Department.objects.all()
+        positions = Position.objects.all()
+        leaves = Leave.objects.all()
+        tasks = Task.objects.all()
+        attendance = Attendance.objects.all()
+
+        user_serializer = UserSerializer(users, many=True)
+        department_serializer = DepartmentSerializer(departments, many=True)
+        position_serializer = PositionSerializer(positions, many=True)
+        leave_serializer = LeaveSerializer(leaves, many=True)
+        task_serializer = TaskSerializer(tasks, many=True)
+        attendance_serializer = AttendanceSerializer(attendance, many=True)
+
+        return Response({
+            'users': user_serializer.data,
+            'departments': department_serializer.data,
+            'positions': position_serializer.data,
+            'leaves': leave_serializer.data,
+            'tasks': task_serializer.data,
+            'attendance': attendance_serializer.data
+        })
 ```
 
-### 5. Create URL Routes in `api/urls.py`
+### 4. URLs in `api/urls.py`
 
 ```python
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import HRLoginView, UserLoginView, UserRegistrationView, UserProfileView, HRUserProfileView, UserViewSet, LeaveViewSet, TaskViewSet, AttendanceViewSet, CheckInView, CheckOutView, HRDashboardView, hr_dashboard
+from .views import (
+    UserViewSet, LeaveViewSet, TaskViewSet, AttendanceViewSet, UserRegistrationView,
+    UserProfileView, HRUserProfileView, CheckInView, CheckOutView, HRLoginView, UserLoginView, HRUserLeaveStatusView, HRDashboardView
+)
 
 router = DefaultRouter()
 router.register(r'users', UserViewSet)
@@ -315,138 +351,24 @@ router.register(r'tasks', TaskViewSet)
 router.register(r'attendance', AttendanceViewSet)
 
 urlpatterns = [
-    path('hr/login/', HRLoginView.as_view(), name='hr_login'),
-    path('user/login/', UserLoginView.as_view(), name='user_login'),
-    path('register/', UserRegistrationView.as_view(), name='user_register'),
+    path('auth/hr-login/', HRLoginView.as_view(), name='hr_login'),
+    path('auth/user-login/', UserLoginView.as_view(), name='user_login'),
+    path('auth/register/', UserRegistrationView.as_view(), name='user_register'),
     path('profile/', UserProfileView.as_view(), name='user_profile'),
-    path('hr/user/<int:user_id>/', HRUserProfileView.as_view(), name='hr_user_profile'),
-    path('hr/dashboard/data/', HRDashboardView.as_view(), name='hr_dashboard_data'),
-    path('hr/dashboard/', hr_dashboard, name='hr_dashboard'),
-    path('checkin/', CheckInView.as_view(), name='checkin'),
-    path('checkout/', CheckOutView.as_view(), name='checkout'),
+    path('profile/<int:user_id>/', HRUserProfileView.as_view(), name='hr_user_profile'),
+    path('check-in/', CheckInView.as_view(), name='check_in'),
+    path('check-out/', CheckOutView.as_view(), name='check_out'),
+    path('hr/leaves-status/', HRUserLeaveStatusView.as_view(), name='hr_user_leaves_status'),
+    path('hr/dashboard/', HRDashboardView.as_view(), name='hr_dashboard'),
     path('', include(router.urls)),
 ]
 ```
 
-### 6. Create Templates
+### Summary of Changes:
 
-Create the `hr_dashboard.html` template in `api/templates/`.
+1. **Models**: Added the `total_leaves_taken` property to the `User` model.
+2. **Serializers**: Adjusted `UserProfileSerializer` to include `total_leaves_taken` and created `HRUserLeaveSerializer` for HR-specific views.
+3. **Views**: Implemented `CheckInView` and `CheckOutView` to allow check-ins and check-outs using user IDs with real-time checking. Added `HRDashboardView` to provide a comprehensive dashboard for HR.
+4. **URLs**: Configured URLs for the new views.
 
-`api/templates/hr_dashboard.html`:
-
-```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>HR Dashboard</title>
-    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0/css/bootstrap.min.css">
-</head>
-<body>
-    <div class="container mt-5">
-        <h1>HR Dashboard</h1>
-        <table class="table table-striped">
-            <thead>
-                <tr>
-                    <th>User ID</th>
-                    <th>First Name</th>
-                    <th>Last Name</th>
-                    <th>Username</th>
-                    <th>Department</th>
-                    <th>Position</th>
-                    <th>Remaining Leaves</th>
-                    <th>Pending Leaves</th>
-                    <th>Approved Leaves</th>
-                </tr>
-            </thead>
-            <tbody id="user-data">
-                <!-- Data will be populated here -->
-            </tbody>
-        </table>
-    </div>
-
-    <script>
-        document.addEventListener("DOMContentLoaded", function () {
-            fetch('/api/hr/dashboard/data/')
-                .then(response => response.json())
-                .then(data => {
-                    const tableBody = document.getElementById("user-data");
-                    data.forEach(user => {
-                        const row = document.createElement("tr");
-                        row.innerHTML = `
-                            <td>${user.id}</td>
-                            <td>${user.first_name}</td>
-                            <td>${user.last_name}</td>
-                            <td>${user.username}</td>
-                            <td>${user.department ? user.department.name : ''}</td>
-                            <td>${user.position ? user.position.title : ''}</td>
-                            <td>${user.remaining_leaves}</td>
-                            <td>${user.pending_leaves}</td>
-                            <td>${user.approved_leaves}</td>
-                        `;
-                        tableBody.appendChild(row);
-                    });
-                })
-                .catch(error => console.error('Error fetching user data:', error));
-        });
-    </script>
-</body>
-</html>
-```
-
-### 7. Update Django Settings
-
-In `employ_management/settings.py`, add the necessary configurations.
-
-```python
-# Add 'api' to INSTALLED_APPS
-INSTALLED_APPS = [
-    ...
-    'rest_framework',
-    'rest_framework_simplejwt',
-    'api',
-]
-
-# Add custom user model
-AUTH_USER_MODEL = 'api.User'
-
-# Configure REST framework and Simple JWT
-REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ],
-    'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.IsAuthenticated',
-    ],
-}
-
-# Add Django templates
-TEMPLATES = [
-    ...
-    {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates'],
-        ...
-        'OPTIONS': {
-            ...
-            'context_processors': [
-                ...
-                'django.template.context_processors.request',
-            ],
-        },
-    },
-]
-```
-
-### 8. Apply Migrations and Run Server
-
-```sh
-python manage.py makemigrations
-python manage.py migrate
-python manage.py createsuperuser
-python manage.py runserver
-```
-
-### Summary
-
-This complete Django code sets up an HR management system with functionalities to view all user details, manage leaves, attendance, tasks, and provides a dashboard for HR to see user details, including pending and approved leaves. The system ensures security by allowing only authenticated users and specific permissions for HR and regular users.
+These changes ensure that users can check in and out in real-time, HR can see all user information on a dashboard, and leave tracking is fully implemented.
